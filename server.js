@@ -73,8 +73,7 @@ app.post('/webhook/inbound', (req, res) => {
     const guid = body.guid || ('inbound_' + Date.now());
     if (!from || !to) return res.json({ ok: true });
     db.prepare('INSERT OR IGNORE INTO messages (guid,from_did,to_did,message,direction,status,created_at) VALUES (?,?,?,?,"inbound","DELIVERED",CURRENT_TIMESTAMP)').run(guid, from, to, message);
-    db.prepare('INSERT INTO conversations (contact_number,our_number,last_message,last_message_at,unread_count) VALUES (?,?,?,CURRENT_TIMESTAMP,1) ON CONFLICT(contact_number,our_number) DO UPDATE SET last_message=excluded.last_message,last_message_at=CURRENT_TIMESTAMP,unread_count=unread_count+1').run(from, to, message);
-    console.log('Saved inbound from', from, 'to', to);
+db.prepare("INSERT OR IGNORE INTO messages (guid,from_did,to_did,message,direction,status,created_at) VALUES (?,?,?,?,'inbound','DELIVERED',CURRENT_TIMESTAMP)").run(guid, from, to, message);    console.log('Saved inbound from', from, 'to', to);
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
