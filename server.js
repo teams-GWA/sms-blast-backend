@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 
 // Delete old database to fix schema issues
-const dbPath = path.join(__dirname, 'messages.db');
+const dbPath = '/tmp/messages.db';
 if (fs.existsSync(dbPath)) { fs.unlinkSync(dbPath); console.log('Old database deleted'); }
 
 const app = express();
