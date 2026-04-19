@@ -6,12 +6,9 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
 app.options('*', cors());
+app.use('/webhook', express.raw({ type: '*/*' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -27,7 +24,6 @@ db.exec(`
     direction TEXT DEFAULT 'outbound',
     status TEXT DEFAULT 'SENT',
     status_code TEXT,
-    carrier TEXT,
     campaign_name TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -36,7 +32,6 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     contact_number TEXT NOT NULL,
     our_number TEXT NOT NULL,
-    contact_name TEXT,
     last_message TEXT,
     last_message_at DATETIME,
     unread_count INTEGER DEFAULT 0,
@@ -46,50 +41,50 @@ db.exec(`
 
 app.post('/webhook/dlr', (req, res) => {
   try {
-    const body = req.body;
+    let body;
+    try { body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString()) : req.body; } catch(e) { body = {}; }
     console.log('DLR:', JSON.stringify(body));
     const guid = body.guid || body.sms_guid || body.message_id;
-    const statusCode = String(body.status || body.delivery_status || '');
+    const statusCode = String(body.status || body.delivery_status || body.send_status || '');
     let status = 'SENT';
     const code = statusCode.toUpperCase();
-    if (code === '200' || code.includes('DELIVERED')) status = 'DELIVERED';
+    if (code === '200' || code.includes('DELIVER')) status = 'DELIVERED';
     else if (code.includes('FAIL') || code === '400' || code === '500') status = 'FAILED';
     else if (code.includes('UNDELIVER')) status = 'UNDELIVERED';
-    if (guid) {
-      db.prepare('UPDATE messages SET status=?, status_code=?, updated_at=CURRENT_TIMESTAMP WHERE guid=?').run(status, statusCode, guid);
-    }
+    if (guid) db.prepare('UPDATE messages SET status=?,status_code=?,updated_at=CURRENT_TIMESTAMP WHERE guid=?').run(status, statusCode, guid);
     res.json({ ok: true });
-  } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+  } catch(e) { console.error('DLR error:', e); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/webhook/inbound', (req, res) => {
   try {
-    const body = req.body;
+    let body;
+    try { body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString()) : req.body; } catch(e) { body = {}; }
     console.log('Inbound:', JSON.stringify(body));
-    const fromDid = String(body.from_did || body.from || '').replace(/\D/g, '').slice(-10);
-    const toDid = String(body.to_did || body.to || '').replace(/\D/g, '').slice(-10);
-    const message = body.message || body.text || body.content || '';
-    const guid = body.guid || body.sms_guid || `inbound_${Date.now()}`;
-    if (!fromDid || !toDid) return res.json({ ok: true });
+    const fromDid = String(body.from_did || body.from || body.From || '').replace(/\D/g, '').slice(-10);
+    const toDid = String(body.to_did || body.to || body.To || '').replace(/\D/g, '').slice(-10);
+    const message = body.message || body.text || body.body || body.Body || body.content || '';
+    const guid = body.guid || body.sms_guid || ('inbound_' + Date.now());
+    console.log('Parsed - from:', fromDid, 'to:', toDid, 'msg:', message);
+    if (!fromDid || !toDid) { console.log('Missing from/to, skipping'); return res.json({ ok: true }); }
     db.prepare('INSERT OR IGNORE INTO messages (guid,from_did,to_did,message,direction,status,created_at) VALUES (?,?,?,?,"inbound","DELIVERED",CURRENT_TIMESTAMP)').run(guid, fromDid, toDid, message);
     db.prepare('INSERT INTO conversations (contact_number,our_number,last_message,last_message_at,unread_count) VALUES (?,?,?,CURRENT_TIMESTAMP,1) ON CONFLICT(contact_number,our_number) DO UPDATE SET last_message=excluded.last_message,last_message_at=CURRENT_TIMESTAMP,unread_count=unread_count+1').run(fromDid, toDid, message);
     res.json({ ok: true });
-  } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+  } catch(e) { console.error('Inbound error:', e); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/messages/outbound', (req, res) => {
   try {
     const { guid, from_did, to_did, message, campaign_name } = req.body;
-    db.prepare('INSERT OR IGNORE INTO messages (guid,from_did,to_did,message,direction,status,campaign_name) VALUES (?,?,?,?,"outbound","SENT",?)').run(guid || `out_${Date.now()}`, from_did, to_did, message, campaign_name || '');
+    db.prepare('INSERT OR IGNORE INTO messages (guid,from_did,to_did,message,direction,status,campaign_name) VALUES (?,?,?,?,"outbound","SENT",?)').run(guid || ('out_' + Date.now()), from_did, to_did, message, campaign_name || '');
     db.prepare('INSERT INTO conversations (contact_number,our_number,last_message,last_message_at,unread_count) VALUES (?,?,?,CURRENT_TIMESTAMP,0) ON CONFLICT(contact_number,our_number) DO UPDATE SET last_message=excluded.last_message,last_message_at=CURRENT_TIMESTAMP').run(to_did, from_did, message);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/conversations', (req, res) => {
-  try {
-    res.json(db.prepare('SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200').all());
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  try { res.json(db.prepare('SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200').all()); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/conversations/:contact/:our', (req, res) => {
@@ -112,8 +107,11 @@ app.get('/api/stats', (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get('/api/debug', (req, res) => {
+  try { res.json(db.prepare('SELECT * FROM messages ORDER BY created_at DESC LIMIT 20').all()); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-app.listen(PORT, () => {
-  console.log('SMS Blast Backend running on port ' + PORT);
-});
+app.listen(PORT, () => console.log('Rsbrm Backend running on port ' + PORT));
