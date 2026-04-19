@@ -2,6 +2,11 @@ const express = require('express');
 const Database = require('better-sqlite3');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+
+// Delete old database to fix schema issues
+const dbPath = path.join(__dirname, 'messages.db');
+if (fs.existsSync(dbPath)) { fs.unlinkSync(dbPath); console.log('Old database deleted'); }
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,11 +17,9 @@ app.use('/webhook', express.raw({ type: '*/*' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const db = new Database(path.join(__dirname, 'messages.db'));
+const db = new Database(dbPath);
 
 db.exec(`
-  DROP TABLE IF EXISTS messages;
-  DROP TABLE IF EXISTS conversations;
   CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guid TEXT UNIQUE,
@@ -40,6 +43,8 @@ db.exec(`
     UNIQUE(contact_number, our_number)
   );
 `);
+
+console.log('Fresh database created');
 
 app.post('/webhook/dlr', (req, res) => {
   try {
