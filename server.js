@@ -35,11 +35,28 @@ async function initDB() {
       unread INTEGER DEFAULT 0,
       UNIQUE(cnum, onum)
     );
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id SERIAL PRIMARY KEY,
+      name TEXT,
+      total INTEGER DEFAULT 0,
+      sent INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      msg TEXT,
+      ts TIMESTAMP DEFAULT NOW()
+    );
   `);
   console.log('DB ready');
 }
 
 initDB().catch(console.error);
+
+async function cleanup() {
+  try {
+    const r = await pool.query("DELETE FROM msgs WHERE dir='outbound' AND ts < NOW() - INTERVAL '24 hours'");
+    if (r.rowCount > 0) console.log('Cleaned up', r.rowCount, 'old outbound messages');
+  } catch(e) { console.error('Cleanup error:', e.message); }
+}
+setInterval(cleanup, 60 * 60 * 1000);
 
 app.post('/webhook/dlr', async (req, res) => {
   try {
@@ -72,10 +89,43 @@ app.post('/webhook/inbound', async (req, res) => {
 
 app.post('/api/messages/outbound', async (req, res) => {
   try {
-    const { guid, from_did, to_did, message, campaign_name } = req.body;
-    await pool.query('INSERT INTO msgs (guid,frm,tod,msg,dir,stat,cname) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (guid) DO NOTHING', [guid || ('out_' + Date.now()), from_did, to_did, message, 'outbound', 'SENT', campaign_name || '']);
+    const { guid, from_did, to_did, message, campaign_name, status } = req.body;
+    await pool.query('INSERT INTO msgs (guid,frm,tod,msg,dir,stat,cname) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (guid) DO NOTHING',
+      [guid || ('out_' + Date.now()), from_did, to_did, message, 'outbound', status || 'SENT', campaign_name || '']);
     await pool.query('INSERT INTO convos (cnum,onum,lastmsg,lastts,unread) VALUES ($1,$2,$3,NOW(),0) ON CONFLICT (cnum,onum) DO UPDATE SET lastmsg=$3,lastts=NOW()', [to_did, from_did, message]);
     res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/campaigns', async (req, res) => {
+  try {
+    const { name, total, sent, failed, msg } = req.body;
+    await pool.query('INSERT INTO campaigns (name,total,sent,failed,msg) VALUES ($1,$2,$3,$4,$5)', [name, total, sent, failed, msg]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/campaigns', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM campaigns ORDER BY ts DESC LIMIT 100');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/export', async (req, res) => {
+  try {
+    const { campaign } = req.query;
+    let q = "SELECT frm as from_number, tod as to_number, msg as message, stat as status, cname as campaign, ts as timestamp FROM msgs WHERE dir='outbound'";
+    const params = [];
+    if (campaign) { q += ' AND cname=$1'; params.push(campaign); }
+    q += ' ORDER BY ts DESC';
+    const r = await pool.query(q, params);
+    const csv = ['From,To,Message,Status,Campaign,Timestamp',
+      ...r.rows.map(r => `${r.from_number},${r.to_number},"${(r.message||'').replace(/"/g,'""')}",${r.status},${r.campaign||''},${r.timestamp}`)
+    ].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="messages.csv"');
+    res.send(csv);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
